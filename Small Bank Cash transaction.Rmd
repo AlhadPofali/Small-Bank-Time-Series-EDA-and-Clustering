@@ -1,0 +1,1147 @@
+---
+title: "Small Bank Cash transactions"
+author: Alhad Pofali
+output:
+  html_document:
+    number_sections: false
+    toc: true
+    fig_width: 8
+    fig_height: 6
+    theme: cosmo
+    highlight: tango
+    code_folding: show
+---
+
+```{r results='hide', message=FALSE, warning=FALSE}
+
+library(ggplot2)
+library(tidytext)
+library(tidyr)
+library(dplyr)
+library(dtwclust)
+library(lubridate)
+library(TSdist)
+library(TSclust)
+library(reshape2)
+library(TSrepr)
+library(clusterCrit)
+library(data.table)
+library(TSrepr)
+
+options(knitr.table.format = "html")
+knitr::opts_chunk$set(dev="png")
+```
+
+
+
+```{r input_file, include=FALSE}
+
+all_NB <- read.csv("/users/saurabhsawant/NON_BULK.txt", header=TRUE, 
+                   sep="\t", col.names=c("SOLID", "TRAN_START_DATE", "TYPE_OF_ACCT","SEGMENT","COUNT_ACCTS", "CASH_WITHDRAWAL_CNT", "CASH_DEPOSIT_CNT", "CASH_WITHDRAWAL_AMT", "CASH_DEPOSIT_AMT"))
+
+all_NB$date <- as.Date(all_NB$TRAN_START_DATE, format = "%Y-%m-%d")
+
+max(all_NB$date)
+```
+
+#Clustering of Time series
+
+## Introduction - What is this about?
+
+Time series forms one of the aspects of looking at the past and predicting future. It reflects the resultant of numerous (or few) factors affecting over time to influence certain behaviour. Time series analysis is usually undertaken when one cannot articulate all the underlying variables affecting outcome. Examples of time series are - sales over past few years, stock price over a day or month or year. There are many variables and not all can be articulated.
+
+And why would past reflect future? Good question. On a going basis, the assumption is that the outcome at a particular instance in past was sum total of numerous variables and going forward in a similar instance of time, the influence would be corelated.
+e.g. sales showing seasonality at a week/month/yearly levels. 
+
+In a typical business processes, time series analysis and forecasting will be part of periodic planning cycle and would be a good starting point for superimposing business strategies in future time periods. In an organizational context, there would be significant number of products or SKUs (Stock keeping Units) that would be planned across various distribution centres.
+
+So where does clustering fit in? Clustering in theoretical sense is a grouping of entities which display similar behavioural characteristics. It can be of one's interest to find out which entities exhibiting common characteristics to articulate strategies to a specific cluster to gain control over them.
+
+
+##Objective
+
+This dataset is of a small financial institution with transactions of cash deposit and withdrawals over a period of time. These are at the day level. There is a geographical spread of various branches. Each branch will have its own characteristics of deposits and withdrawals based on the type of catchment area it caters to.
+
+Objective here would be to cluster various branches based on behaviour of deposits and withdrawals. Overarching objective (beyond scope of this exercise) which such study would be to use this cluster information to develop forecasting model with its parameters tuned to a certain cluster.
+
+With this objective in mind, we will proceed with exploration of data, cleaning it and then clustering it.
+
+#Characteristics of data
+
+
+
+Column descriptions
+Branchid - Total number of branches ``r length(as.list(unique(all_NB$SOLID)))``  
+Type of Account - Different types of account ``r unique(all_NB$TYPE_OF_ACCT)``  
+Segments - Different segments as part of accounts ``r unique(all_NB$SEGMENT)``  
+date - Earliest start date - ``r min(all_NB$date)`` - Last date in data - ``r max(all_NB$date)``  
+Total count of transactions  
+Count of withdrawals  
+Count of deposits  
+Cash withdrwal amount  
+Cash deposit amount  
+
+Total number of records in data (including NAs) ``r nrow(all_NB)``  
+Number of unique combinations for type of accounts and segments for each account ``r nrow(unique(all_NB[,c("TYPE_OF_ACCT", "SEGMENT")]))``  
+
+```{r data summary, warning=FALSE}
+summary(all_NB)
+```
+
+
+#Data exploration
+##Unique combinations in data
+This list signifies the various combinations of type of account and segment contained in data set for each branch. This is extended to each branch and hence there many time series' as seen later.
+
+
+```{r unique records, warning=FALSE}
+unique(all_NB[,c("TYPE_OF_ACCT", "SEGMENT")])
+```
+##Number of data records with above combinations including branches
+
+
+```{r summary of combinations, message=FALSE, warning=FALSE}
+t <- all_NB %>%
+  group_by(SOLID,TYPE_OF_ACCT, SEGMENT) %>%
+  summarise(s = n_distinct(TRAN_START_DATE))
+
+require('DT')
+    d = data.frame(
+      t,
+      stringsAsFactors = FALSE
+    )
+    dt <- datatable(d, filter = 'bottom', options = list(pageLength = 5)) %>%
+    formatStyle('s',  
+                color = styleInterval(c(0.5, 100), c('black', 'red', 'blue')),
+                fontWeight = styleInterval(58.0, c('italics', 'bold')))
+dt
+
+```
+
+
+Number of time series in dataset - No. of branches X type of accounts X Segment = ``r nrow(t)``  
+
+Above table shows that there are NA in Type of Account. Imputing values would not be logical as the segment belong to different type of account. Hence these have to be removed.  
+  
+Number of NAs in the data - ``r sum(is.na(all_NB$TYPE_OF_ACCT))``
+
+```{r remove NAs}
+all_NB <- all_NB[complete.cases(all_NB[,3:4]),]
+```
+
+
+```{r sumarize by date, warning=FALSE}
+t <- all_NB %>%
+  group_by(SOLID,TYPE_OF_ACCT, SEGMENT) %>%
+  summarise(s = n_distinct(TRAN_START_DATE))
+
+```
+No of rows of data after the NAs are removed - ``r sum(t$s)``  
+
+
+
+Aggregation by date
+
+We will take a top down approach. By aggregating the data and checking at high level may highligt if there are any major descrepancies. Here we have aggregated data by date for all branches, account type and segment. We will plot cumulative withdrawal and deposit amounts by date for complete time period.
+```{r sumarize by date for all key figures, warning=FALSE}
+all_NB %>% group_by(date) %>% 
+  summarise(CWC = sum(CASH_WITHDRAWAL_CNT), CDC=sum(CASH_DEPOSIT_CNT), CWA = sum(CASH_WITHDRAWAL_AMT), CDA = sum(CASH_DEPOSIT_AMT)) %>% 
+  ungroup() -> all_date
+
+ggplot() +
+  geom_line(data = all_date, aes(x = date, y = CWA, colour = "Cash Withdrawal Amt")) +
+  geom_line(data = all_date, aes(x = date, y = CDA, colour = "Cash Deposit Amt")) +
+  labs(title="Deposit and Withdrawal pattern at Branch level", x ="Time", y = "Amount")+
+  theme_bw()
+```
+
+
+Plot shows that there is a major spike seen in the data for cash deposit amount(CDA) in last couple of month of data. Let us magnifiy that period to take a closer look.
+
+
+```{r plot of later data}
+ggplot() +
+  geom_line(data = filter(all_date, date > "2012-08-01"), aes(x = date, y = CDA, colour = "> 082012")) +
+  labs(title="Deposit Pattern post 2012-08-01", x ="Years", y = "Amount")+
+  theme_bw()
+  
+```
+
+
+**Are these ouliers?**  
+Relative to complete period, there is manyfold jump in the cumulative amount only in last couple of days of data period. It does seem they are outliers but it would warrent further analysis at a detailed level since current data is aggregated data. We need to find few reasons before we term it as outlier.  
+  
+a) Is it reflected in a spike in the transaction counts for deposits too? More number of deposits can be a reason of spike.  
+
+
+```{r evaluate counts}
+ggplot() +
+  geom_line(data = all_date, aes(x = date, y = CDC, colour = "Cash Deposit Count")) +
+  geom_line(data = all_date, aes(x = date, y = CWC, colour = "Cash Withdrawal Count")) +
+  labs(title="Count of transaction for Deposits and W'drawals", x ="Years", y = "Amount")+
+  theme_bw()
+```
+
+Both time series show stable pattern with no major spikes as seen in the later dates for Cash Deposit amount.   
+  
+b) Is spiked pattern reflected across all the branches or only few?  
+
+Lets plot few branches for deposit patterns.  
+
+```{r plot of branch deposits}
+all_NB %>% group_by(SOLID, date) %>% 
+  summarise(CWC = sum(CASH_WITHDRAWAL_CNT), CDC=sum(CASH_DEPOSIT_CNT), CWA = sum(CASH_WITHDRAWAL_AMT), CDA = sum(CASH_DEPOSIT_AMT)) %>% 
+  ungroup() -> all_NB_SOL
+
+ggplot(data = subset(all_NB_SOL, SOLID %in% unique(all_NB_SOL$SOLID)[1:25]), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  labs(title="Cash Deposit Pattern for 25 branches", x ="Years", y = "Amount")+
+  facet_wrap(~SOLID, scale = "free")
+```
+
+
+Whoo!.. All the branches have some spikes in the later period.. Lets confirm with another rest of branches if there is deviation. This is leading to a pattern...  
+
+
+
+```{r plot of branch deposits - rest}
+ggplot(data = subset(all_NB_SOL, SOLID %in% unique(all_NB_SOL$SOLID)[25:50]), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Cash Deposit Pattern for 25 branches", x ="Years", y = "Amount")
+
+ggplot(data = subset(all_NB_SOL, SOLID %in% unique(all_NB_SOL$SOLID)[51:75]), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  labs(title="Cash Deposit Pattern for next 25 branches", x ="Years", y = "Amount")+
+  facet_wrap(~SOLID, scale = "free")
+
+ggplot(data = subset(all_NB_SOL, SOLID %in% unique(all_NB_SOL$SOLID)[76:100]), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  labs(title="Cash Deposit Pattern for next 25 branches", x ="Years", y = "Amount")+
+  facet_wrap(~SOLID, scale = "free")
+
+ggplot(data = subset(all_NB_SOL, SOLID %in% unique(all_NB_SOL$SOLID)[101:128]), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  labs(title="Cash Deposit Pattern for rest of branches", x ="Years", y = "Amount")+
+  facet_wrap(~SOLID, scale = "free")
+```
+
+
+Confirmed!! - There seems to be some data issue as all the branches exhibit similar behaviour. We have option of either using outlier correction or ignoring this part of data. The better option here seems to be ignoring the data as outlier would also either ignore the data point or we would need to come up with a appropriate logic to impute data e.g. mean, median etc.
+since there is no significant loss of data due to this (last 12 days) it would convenient to ignore.  
+
+Now lets check how withdrawals look like for few branches.
+
+```{r truncate data, message=FALSE}
+all_NB <- filter(all_NB, date <= "2012-08-31")
+
+all_NB %>% group_by(SOLID, date) %>% 
+  summarise(CWC = sum(CASH_WITHDRAWAL_CNT), CDC=sum(CASH_DEPOSIT_CNT), CWA = sum(CASH_WITHDRAWAL_AMT), CDA = sum(CASH_DEPOSIT_AMT)) %>% 
+  ungroup() -> all_NB_SOL
+
+ggplot(data = subset(all_NB_SOL, SOLID %in% unique(all_NB_SOL$SOLID)[1:25]), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="First 25 branches for Withdrawal Amount", x ="Years", y = "Amount")+
+  theme_bw()
+```
+
+Data looks much cleaner now reveling few more actual outliers and steady pattern in many cases. Before we are happy, lets confirm for few more branches..
+```{r plot post truncation, message=FALSE}
+ggplot(data = subset(all_NB_SOL, SOLID %in% unique(all_NB_SOL$SOLID)[26:50]), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Next 25 branches for Withdrawal Amount", x ="Years", y = "Amount")+
+    theme_bw()
+```
+
+
+##Analysis by Type of Account
+
+With data looking good at aggregate level for both deposits and withdrawals, lets check at next characteristics of type of account. A below bar plot will show how the deposits and withdrawals fair at account levels.
+
+```{r analysis by type of account}
+
+all_NB %>% 
+  group_by(TYPE_OF_ACCT) %>% 
+  summarise(CDC = sum(CASH_DEPOSIT_CNT),CDA = sum(CASH_DEPOSIT_AMT),CWC = sum(CASH_WITHDRAWAL_CNT), CWA = sum(CASH_WITHDRAWAL_AMT))%>% 
+  ungroup() -> q
+
+df <- subset(q, select = c("TYPE_OF_ACCT", "CWA", "CDA"))
+
+df2 <- melt(df, id.vars='TYPE_OF_ACCT')
+
+ggplot(df2, aes(x=TYPE_OF_ACCT, y=value, fill=variable)) +
+  geom_bar(stat='identity', position='dodge')+
+  labs(title="Comparision Deposit and Withdrawal by Account Type", x ="Accout Type", y = "Amount")+
+  theme_classic()
+```
+
+
+What is seen here is that there are two dominant accounts current and salary. The volume of CA and SA are comparable. Do we need a separate time series analysis for this? Lets come back to this when we check the data at segement level too.  
+
+
+## Segment level exploration.
+
+Segment is a level deeper than type of account. There are many segements and our objective of analysis would be if we have a good continious data for all segments for time series analysis. Usually in such cases, we have gaps and erratic data leading to lot of noise. This noise gets evened out when some level of aggregation is applied.
+
+```{r analysis by segment}
+all_NB %>% 
+  group_by(SEGMENT) %>% 
+  summarise(CDA = sum(CASH_DEPOSIT_AMT), CWA = sum(CASH_WITHDRAWAL_AMT))%>% ungroup() -> r
+
+df3 <- melt(r,id.vars = "SEGMENT")
+ggplot(df3, aes(x=SEGMENT, y=value, fill=variable)) +
+  geom_bar(stat='identity', position='dodge')+
+  labs(title="Plot of deposits by Segement", x ="Segments", y = "Amount")+
+  theme_classic()
+
+ggplot(data = all_NB %>% group_by(SOLID, SEGMENT, date) %>% summarise(CWA = sum(CASH_WITHDRAWAL_AMT), CDA = sum(CASH_DEPOSIT_AMT)), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  facet_wrap(~SEGMENT)+
+  labs(title="Plot of deposits by segments", x ="Years/Segments", y = "Amount")+
+  theme_bw()
+```
+
+
+Only two segments are dominant i.e. HH and SEG out of twelve. Hence the data would be sparse for good time series. Also, a business consideration comes into play if data is being used for which purpose.   
+
+Our current objective being a clustering, it would not make sense to cluster the data which belongs to two different branches.
+
+Sub Conclusion: Further analysis can be carried out at the branch id level. Hence we need to aggregate data at the branch level for account and segments at daily level and check for data sanctity.  
+
+## Outlier corrections - Deposits and Withdrawals
+
+There are lot of outliers which are seen at the branch level the data. We will try to remove them.  
+Since we want to remove only extreme values, the boundry that has been retained is 0.02 to 0.98 quantile.  
+outliers are present for both deposit and withdrawals.
+
+```{r outlier correction, message=FALSE, warning=FALSE}
+#Define function to correct outlier
+rem_out <- function(ID) {
+  p <- filter(all_NB_SOL, all_NB_SOL$SOLID == as.integer(ID))
+  q <- subset(p,!(p$CDA > quantile(p$CDA, probs=c(.02, .98))[2] | p$CDA < quantile(p$CDA, probs=c(.02, .98))[1]) )
+  r <- subset(q,!(q$CWA > quantile(q$CWA, probs=c(.02, .98))[2] | q$CWA < quantile(q$CWA, probs=c(.02, .98))[1]) )
+  r
+}
+
+#Use loop across to branches to correct outliers
+all_NB_SOL_out<- as.vector(0)
+
+for (i in unique(all_NB_SOL$SOLID)) {
+  x <-rem_out(i)
+  all_NB_SOL_out <- if (all_NB_SOL_out == 0) x else rbind(all_NB_SOL_out,x)
+}
+
+```
+
+
+```{r Outlier plots, message=FALSE, warning=FALSE}
+
+#plot how the data looks like at the branch id level.
+
+ggplot(data = subset(all_NB_SOL_out, SOLID %in% unique(all_NB_SOL_out$SOLID)[1:25]), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of deposits post Outlier correction - 1-25 branches", x ="Years", y = "Amount")
+
+ggplot(data = subset(all_NB_SOL_out, SOLID %in% unique(all_NB_SOL_out$SOLID)[26:50]), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of deposits post Outlier correction - 26-50 branches", x ="Years", y = "Amount")
+
+ggplot(data = subset(all_NB_SOL_out, SOLID %in% unique(all_NB_SOL_out$SOLID)[51:75]), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of deposits post Outlier correction - 51-75 branches", x ="Years", y = "Amount")
+
+ggplot(data = subset(all_NB_SOL_out, SOLID %in% unique(all_NB_SOL_out$SOLID)[76:100]), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of deposits post Outlier correction - 76-100 branches", x ="Years", y = "Amount")
+
+ggplot(data = subset(all_NB_SOL_out, SOLID %in% unique(all_NB_SOL_out$SOLID)[101:128]), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of deposits post Outlier correction - 101-128 branches", x ="Years", y = "Amount")
+```
+
+
+In the later part of the plots with branches do still have outliers but largely some significant transactions as the base level of other data is quite low. For now we will live with these outliers.
+
+Now lets look at the Withdrawals.
+
+```{r Outlier plots withdrawals, message=FALSE, warning=FALSE}
+#plot how the data looks like at the branch id level.
+
+ggplot(data = subset(all_NB_SOL_out, SOLID %in% unique(all_NB_SOL_out$SOLID)[1:25]), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of Withdrawals post Outlier correction - 1-25 branches", x ="Years", y = "Amount")
+
+ggplot(data = subset(all_NB_SOL_out, SOLID %in% unique(all_NB_SOL_out$SOLID)[26:50]), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of Withdrawals post Outlier correction - 26-50 branches", x ="Years", y = "Amount")
+
+ggplot(data = subset(all_NB_SOL_out, SOLID %in% unique(all_NB_SOL_out$SOLID)[51:75]), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of Withdrawals post Outlier correction - 51-75 branches", x ="Years", y = "Amount")
+
+ggplot(data = subset(all_NB_SOL_out, SOLID %in% unique(all_NB_SOL_out$SOLID)[76:100]), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of Withdrawals post Outlier correction - 76-100 branches", x ="Years", y = "Amount")
+
+ggplot(data = subset(all_NB_SOL_out, SOLID %in% unique(all_NB_SOL_out$SOLID)[101:128]), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of Withdrawals post Outlier correction - 101-128 branches", x ="Years", y = "Amount")
+```
+
+
+Plotting these distributions we see that they appear quite regular with no unusual peaks or drops. There are few branches which do show intermittent peaks. The base level of data is also low for these branches and few bigger transactions are seen as outliers. From our objective of clustering we can live with same. 
+
+
+
+```{r plot of spordic transactions branches, message=FALSE, warning=FALSE}
+
+#ggplot() +
+#  geom_line(data = subset(all_NB_SOL_out, all_NB_SOL_out$SOLID == "6707"), aes(x = date, y = CWA, colour = #"6707")) +
+#  geom_line(data = subset(all_NB_SOL_out, all_NB_SOL_out$SOLID == "6710"), aes(x = date, y = CWA, colour = #"6710")) +
+#  geom_line(data = subset(all_NB_SOL_out, all_NB_SOL_out$SOLID == "6721"), aes(x = date, y = CWA, colour = "6721")) +
+#  geom_line(data = subset(all_NB_SOL_out, all_NB_SOL_out$SOLID == "6725"), aes(x = date, y = CWA, colour = "6725")) +
+#  labs(title="Cash Deposit Pattern for branches 6707, 6710, 6721, 6725", x ="Years", y = "Amount")
+```
+
+Let us evaluate the potential data loss with outlier corrections.   
+- Number of records lost due to outliers - ``r nrow(all_NB_SOL) - nrow(all_NB_SOL_out)``  
+- % of data loss - ``r ((nrow(all_NB_SOL) - nrow(all_NB_SOL_out))/nrow(all_NB_SOL))*100``
+
+
+##Analysis for Branches by their business volume. 
+
+Let us analyze a bit more on the branches by their volume of business and check if there are any significant patterns.
+One approach is to check the mean(average) transaction sizes over the period of time and rank them. Cumulative might also work but should work but would be similar. 
+
+Means of both deposits and withdrawals would provide delta between two at branch level. 
+```{r Calculate means, message = FALSE, warning=FALSE}
+CDAmean <- 0
+for (i in unique(all_NB_SOL_out$SOLID)) {
+  x <-data.frame(as.character(i),mean(filter(all_NB_SOL_out, all_NB_SOL_out$SOLID == as.character(i))$CDA))
+  CDAmean <- if (CDAmean == 0) x else rbind(CDAmean,x)
+}
+
+CWAmean <- 0
+
+for (i in unique(all_NB_SOL_out$SOLID)) {
+  x <-data.frame(as.character(i),mean(filter(all_NB_SOL_out, all_NB_SOL_out$SOLID == as.character(i))$CWA))
+  CWAmean <- if (CWAmean == 0)x else rbind(CWAmean,x)
+}
+
+
+Means <- cbind(CDAmean, CWAmean)
+Means <- Means[,-3]
+colnames(Means) <- c("SOLID", "CDAMean", "CWAMean")
+
+```
+
+
+```{r plot means, message=FALSE, warning=FALSE }
+
+ggplot(data = Means, aes(x = reorder(Means$SOLID, Means$CDAMean), y = Means$CDAMean)) +
+  geom_bar(stat="identity", fill="Green")+
+  labs(title="Mean value of Deposits by each branch", x ="Branches", y = "Amount")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank()) 
+  
+
+ggplot(data = Means, aes(x = reorder(Means$SOLID, Means$CWAMean), y = Means$CWAMean)) +
+  geom_bar(stat="identity", fill="Red")+
+  labs(title="Mean value of Withdrawals by each Branch", x ="Branches", y = "Amount")+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank())
+  
+
+```
+
+The intent of above plots is to show the Pareto effect where few branches are significantly higher than others. Withdrawal has even steeper pattern than deposits. Business significance of this information is very high which will form input to designing of service levels and cash handling capacities.
+
+To have an ease of reading, below we will plot top 10 by means for deposits and withdrawals.
+
+```{r plot means adjecent, message=FALSE, warning=FALSE}
+a<-Means[with(Means,order(-Means$CDAMean)),][1:10,]
+ggplot(data = a, aes(x = reorder(a$SOLID, a$CDAMean), y = a$CDAMean)) +
+  geom_bar(stat="identity", fill="Blue")+
+    labs(title="Top 10 branches by largest Deposit Means ", x ="Branches", y = "Amount")+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank())
+
+b <- Means[with(Means,order(-Means$CWAMean)),][1:10,]
+ggplot(data = b, aes(x = reorder(b$SOLID, b$CWAMean), y = b$CWAMean)) +
+  geom_bar(stat="identity", fill="Red")+
+    labs(title="Top 10 branches with largest Withdrawal Means", x ="Branches", y = "Amount")+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank())
+
+```
+
+
+Ok, we got the top then branches for each. However, we notice that **scales** of these two plots is different. Lets get the deposit and withdrawals in one image to check magnitude of difference between two. Since top 10 branches are different for each, we take a union of same.
+
+```{r plot staggered}
+
+e <-rbind(a,b)
+e <-unique(e)
+
+df4 <- melt(e,id.vars = "SOLID")
+ggplot(df4, aes(x=SOLID, y=value, fill=variable)) +
+  geom_bar(stat='identity', position='dodge')+
+  labs(title="Magnitude of difference between Mean values of Deposit and Withdrawals", x ="Branches", y = "Amount")+
+      theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank())
+
+```
+
+For few branches, the difference is significantly higher. These branches would be always running short of cash. This information has a logistical value and operations can plan for this behaviour.
+
+Below table shows all the branches where withdrawals are more than deposits. There are 15 such branches.
+```{r table with > deposit}
+#highlight branches where there withdrawals greater than deposits.
+Means_diff <- Means
+Means_diff$diff <- ifelse(Means_diff$CWAMean > Means_diff$CDAMean, Means_diff$CDAMean - Means_diff$CWAMean, 0)
+
+subset(Means_diff, Means_diff$diff < 0)
+```
+
+This concludes the data exploratory part of the project. Following information would be key to further analysis
+
+a) Aggregate data at branch level is best suited for clustering analysis as account and segment has lot of noise.
+b) There are significant differences in the deposits and withdrawals at branch level. 
+
+#Clustering
+
+With data **cleaned** with outliers we can proceed with clustering. We will try to find clusters of branches based on deposit and withdrawals.
+
+since we do not have adequate information on potential number of clusters, we will need to find good number to start with and then use it with visual inspection to ascertain it.
+
+##Clustering deposits
+
+Lets look at clustering based on deposits made in branches. To determine *number of clusters* we will deploy 3 difference methods
+
+a) best number of clusters across methods offered by package clValid
+b) *Scree plot* based on the package TSrepr
+c) plot *hierarchical cluster* based on different distance types
+
+
+a) **clValid** - Here we will check with 3 to 8 clusters as a range for input along with hierarchical and partitional clustering technique. This function provides score with best number of cluster to go with each clustering method. One of the key requirement of this package is that timeseries should be in a row. Hence we use function "spread" to transpose it. This function also fill the value as NA for missing date. It also makes each time series of uniform length. it will take the max/min date in the data frame and use it for all-time series.
+
+**Parameters** 
+- data is in the matrix form.
+- range of clusters
+- Methods of clustering
+- Validation measures - check various options (internal, stability, biological) - stability is chosen here as it seemed to have better response to data. It removes and replaces data to form various clusters.
+- method - it is the distance calculated between clusters. "ward" seems to provide with distinct clusters
+This function takes significant time. One would require to run through different iterations to arrive at stable numbers
+
+```{r clValid, message=FALSE, warning=FALSE}
+
+all_CDA<- subset(all_NB_SOL_out, select = c("SOLID", "date", "CDA") )
+
+all_CDA_T <- spread(all_CDA, key = date, value = CDA)
+
+all_CDA_test <- all_CDA_T
+
+temp <- as.matrix(all_CDA_test)
+
+library("clValid")
+
+intern <- clValid(temp, nClust = 3:8, 
+                  clMethods = c("hierarchical","pam"),
+                  validation = "stability",
+                  metric = "correlation",
+                  method = "ward")
+# Summary
+summary(intern)
+
+```
+
+
+The choice of clusters that we get here are **4 and 8**. If hierarchical is preference then it shows only 8 clusters. To validate further we will use another method if the choice of number of clusters is appropriate.
+
+**TSrepr** - this library focuses on specifically time series and its representations. Function used is repr_matrix which will normalize the data and one can provide the frequency of the data. Here the data is at daily level and we would like to take complete range in evaluation.
+
+Once data is converted using this function, we can use *K - mediods* algorithm to extract typical profiles. Here we provide range of 3-10 clusters since we had a been suggested 8 clusters in our earlier analysis. Internally the cluster have to be evaluated using some index and we use Davies-Bouldin index. Other evaluation measures are Dunn or Silhouette.  
+*https://en.wikipedia.org/wiki/Davies–Bouldin_index*
+
+we will use two methods DB index and Silhouette  to check number of clusters.
+
+```{r TSrepr clusters, warning=FALSE}
+
+all_CDA_test[is.na(all_CDA_test)] <- 0
+
+data_seasprof_d <- repr_matrix(all_CDA_test[1:128,], func = repr_seas_profile,
+                             args = list(freq = 584, func = mean),
+                             normalise = TRUE, func_norm = norm_z)
+
+
+clusterings_d <- lapply(c(3:10), function(x)
+  pam(data_seasprof_d, x))
+
+DB_values_d_db <- sapply(seq_along(clusterings_d), function(x) 
+  intCriteria(data_seasprof_d, as.integer(clusterings_d[[x]]$clustering),
+              c("Davies_Bouldin")))
+
+DB_values_d_s <- sapply(seq_along(clusterings_d), function(x) 
+  intCriteria(data_seasprof_d, as.integer(clusterings_d[[x]]$clustering),
+              c("Silhouette")))
+
+```
+
+```{r plot scree, warning=FALSE}
+ggplot(data.table(Clusters = 3:10, DBindex = unlist(DB_values_d_db)),
+       aes(Clusters, DBindex)) +
+  geom_line(size = 0.5) +
+  geom_point(size = 3) +
+  theme_bw()+
+  labs(title="Davies - Bouldin index for deciding number of clusters", x ="cluster", y = "DBIndex")
+
+ggplot(data.table(Clusters = 3:10, DBindex = unlist(DB_values_d_s)),
+       aes(Clusters, DBindex)) +
+  geom_line(size = 0.5) +
+  geom_point(size = 3) +
+  theme_bw()+
+  labs(title="Silhouette index for deciding number of clusters", x ="cluster", y = "DBIndex")
+
+```
+
+
+With Davis Boulding index, we can choose between 6, 7 and 8. Though slope remains constant post 6 clusters, the value of index is quite significant till 8 clusters. Hence with this 8 can be chosen.
+
+With Silhouette too best value seen in 7. Hence with this approach we can keep 7 and proceed to check how the clusters look like in heiarchical plot.
+
+## Heirarchial clustering - SBD
+
+For heirarchial clustering we use **dtwclust** library with function tsclust. There are many distance measures available for parameter distance. Here we use **SBD(shape based distance) and DTW (Dynamic Time Wrap)** for trying different output that suits data.  
+*DTW is Euclidean squared distance between two given vectors.*
+
+
+```{r H time series cluster, warning=FALSE}
+
+#1. distance = SBD
+hcc<- tsclust(all_CDA_test[1:128,], type = "h", k = 7L,
+              preproc = zscore, seed = 999,
+              distance = "sbd", centroid = shape_extraction,
+              control = hierarchical_control(method = "ward.D2")
+)
+```
+
+```{r plot H cluster}
+
+plot(hcc, xlab = "Clustering using ward.D2 method", ylab = "",
+     main="Cluster Dendogram using SBD distance measure")
+
+rect.hclust(hcc, k = 7, border = 2:5)
+
+```
+
+From the plot of cluster 7 clusters do seem logical here visually. Let us try to see how each cluster looks like..
+
+```{r clusters of H clust, out.width = "50%"}
+plot(hcc, type = "sc") # plot of clusters combined to all SOLID
+plot(hcc, type = "series", clus = 1L, main = "Branches in cluster 1")
+plot(hcc, type = "series", clus = 2L, main = "Branches in cluster 2")
+plot(hcc, type = "series", clus = 3L, main = "Branches in cluster 3")
+plot(hcc, type = "series", clus = 4L, main = "Branches in cluster 4")
+plot(hcc, type = "series", clus = 5L, main = "Branches in cluster 5")
+plot(hcc, type = "series", clus = 6L, main = "Branches in cluster 6")
+plot(hcc, type = "series", clus = 7L, main = "Branches in cluster 7")
+```
+
+Clustering has largely happend based on shapes of series. There are different patterns in each cluster.
+
+```{r cluster table, message=FALSE, warning=FALSE}
+clust_df <- as.data.frame(hcc@cluster) # create a data frame for classification
+clust_df$SOLID <- all_CDA_test$SOLID
+colnames(clust_df) <- c("SBD", "SOLID")
+message("Below is Distribution of branches in clusters for deposits and SBD")
+as.data.frame(table(clust_df$SBD))# number of members in each cluster..
+```
+Above table shows the number of branches in different clusters. lets us plot all the clusters with their branches to check if the shapes resemble of cluster members
+
+### Plot of clusters - SBD
+
+Based on the consolidated graphs seen earlier for all the clusters, we will plot the distribution of each branch for  deposits based on the SBD distance matrix.
+```{r plot clusters branches SBD, message=FALSE, warning=FALSE}
+ggplot(data = filter(all_CDA, SOLID %in% c(as.character((clust_df%>% filter(clust_df$SBD == 1))$SOLID))), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07",method = "loess")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Branches is cluster 1 for Deposits with SBD distance measure", x ="Branches/Time", y = "Amount")+
+  theme_bw()
+
+
+ggplot(data = filter(all_CDA, SOLID %in% c(as.character((clust_df%>% filter(clust_df$SBD == 2))$SOLID))), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Branches is cluster 2 for Deposits with SBD distance measure", x ="Branches/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CDA, SOLID %in% c(as.character((clust_df%>% filter(clust_df$SBD == 3))$SOLID))), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Branches is cluster 3 for Deposits with SBD distance measure", x ="Branches/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CDA, SOLID %in% c(as.character((clust_df%>% filter(clust_df$SBD == 4))$SOLID))), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Branches is cluster 4 for Deposits with SBD distance measure", x ="Branches/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CDA, SOLID %in% c(as.character((clust_df%>% filter(clust_df$SBD == 5))$SOLID))), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Branches is cluster 5 for Deposits with SBD distance measure", x ="Branches/Time", y = "Amount")+
+  theme_bw()
+
+
+ggplot(data = filter(all_CDA, SOLID %in% c(as.character((clust_df%>% filter(clust_df$SBD == 6))$SOLID))), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Branches is cluster 6 for Deposits with SBD distance measure", x ="Branches/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CDA, SOLID %in% c(as.character((clust_df%>% filter(clust_df$SBD == 7))$SOLID))), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Branches is cluster 7 for Deposits with SBD distance measure", x ="Branches/Time", y = "Amount")+
+  theme_bw()
+
+```
+
+## Heirarchial clustering - DTW
+
+Let us use the DTW distance metric and plot cluster and try to see if we get something different than SBD plot.
+
+```{r H clust DTW deposits}
+hcc1<- tsclust(all_CDA_test[1:128,], type = "h", k = 7L,
+              preproc = zscore, seed = 999,
+              distance = "dtw", centroid = shape_extraction,
+              control = hierarchical_control(method = "ward.D2")
+)
+```
+
+
+```{r plot H clust 7}
+plot(hcc1, xlab = "Clustering using ward.D2 method", ylab = "",
+     main="Cluster Dendogram using DTW distance measure")
+rect.hclust(hcc1, k = 7, border = 2:5)
+```
+
+From above plot we can see that 7 clusters seem logical based on visual cutoff. The rectangles would usually try to capture the branches and the height combination for segregation. Clusters 4th and 5th though can be clubed into one, it would be interesting to observe what are the characteristics difference between two.
+
+
+```{r plot elements of H clust, out.width="50%", out.height="50%"}
+plot(hcc1, type = "sc") # plot of clusters combined to all SOLID
+plot(hcc1, type = "series", clus = 1L)
+plot(hcc1, type = "series", clus = 2L)
+plot(hcc1, type = "series", clus = 3L)
+plot(hcc1, type = "series", clus = 4L)
+plot(hcc1, type = "series", clus = 5L)
+plot(hcc1, type = "series", clus = 6L)
+plot(hcc1, type = "series", clus = 7L)
+```
+
+
+```{r SBD vs DTW clusters, warning=FALSE, message=FALSE}
+clust_df$dtw <- (hcc1@cluster)
+colnames(clust_df) <- c("SBD", "SOLID", "DTW")
+
+
+as.data.frame(table(clust_df$SBD))
+message("Above is Distribution for cluster of SBD")
+
+as.data.frame(table(clust_df$DTW))
+message("Above is Distribution for cluster of DTW")
+```
+
+Above tables shows the distribution of branches amongst different clusters
+
+###Plot of clusters - DTW
+Lets plot the individual branches shown in the clusters and plot their behaviour.
+
+```{r Plot branch clusters based on DTW, message=FALSE, warning=FALSE}
+ggplot(data = filter(all_CDA, SOLID %in% c(as.character((clust_df%>% filter(clust_df$DTW == 1))$SOLID))), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07",method = "loess")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Branches is cluster 1 for Deposits with DTW distance measure", x ="Branches/Time", y = "Amount")+
+  theme_bw()
+
+
+ggplot(data = filter(all_CDA, SOLID %in% c(as.character((clust_df%>% filter(clust_df$DTW == 2))$SOLID))), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Branches is cluster 2 for Deposits with DTW distance measure", x ="Branches/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CDA, SOLID %in% c(as.character((clust_df%>% filter(clust_df$DTW == 3))$SOLID))), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Branches is cluster 3 for Deposits with DTW distance measure", x ="Branches/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CDA, SOLID %in% c(as.character((clust_df%>% filter(clust_df$DTW == 4))$SOLID))), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Branches is cluster 4 for Deposits with DTW distance measure", x ="Branches/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CDA, SOLID %in% c(as.character((clust_df%>% filter(clust_df$DTW == 5))$SOLID))), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Branches is cluster 5 for Deposits with DTW distance measure", x ="Branches/Time", y = "Amount")+
+  theme_bw()
+
+
+ggplot(data = filter(all_CDA, SOLID %in% c(as.character((clust_df%>% filter(clust_df$DTW == 6))$SOLID))), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Branches is cluster 6 for Deposits with DTW distance measure", x ="Branches/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CDA, SOLID %in% c(as.character((clust_df%>% filter(clust_df$DTW == 7))$SOLID))), aes(x = date, y = CDA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Branches is cluster 7 for Deposits with DTW distance measure", x ="Branches/Time", y = "Amount")+
+  theme_bw()
+
+```
+
+Above plots are for DTW distance metric. Visually inspecting, we get better segregation of branches based on their behaviour. We will go with DTW metric for cluster distribution
+
+
+#Clustering for withdrawals CWA
+
+Similar to deposits, we will explore the plots for withdrawals. The steps would be repeated as those of deposits analysis.
+
+
+```{r clValid withdrawals, message = FALSE, warning=FALSE}
+all_CWA<- subset(all_NB_SOL_out, select = c("SOLID", "date", "CWA") )
+
+all_CWA_T <- spread(all_CWA, key = date, value = CWA)
+
+all_CWA_test <- all_CWA_T
+all_CWA_test[is.na(all_CWA_test)] <- 0
+temp_w <- as.matrix(all_CWA_test)
+
+
+intern_w <- clValid(temp_w, nClust = 4:8, 
+                  clMethods = c("hierarchical","pam"),
+                  validation = "internal",
+                  metric = "correlation",
+                  method = "ward")
+```
+
+
+```{r number of data records records}
+summary(intern_w)
+
+```
+
+Optimal Scores section is a summary of min/max scores. Cluster we have been suggested either **4 or 8** clusters with method PAM.
+```{r scree withdrawals DB}
+
+data_seasprof_w <- repr_matrix(all_CWA_test[1:128,], func = repr_seas_profile,
+                             args = list(freq = 584, func = mean),
+                             normalise = TRUE, func_norm = norm_z)
+
+clusterings_w <- lapply(c(3:10), function(x)
+  pam(data_seasprof_w, x))
+
+DB_values_w_db <- sapply(seq_along(clusterings_w), function(x) 
+  intCriteria(data_seasprof_w, as.integer(clusterings_w[[x]]$clustering),
+              c("Davies_Bouldin")))
+
+
+ggplot(data.table(Clusters = 3:10, DBindex = unlist(DB_values_w_db)),
+       aes(Clusters, DBindex)) +
+  geom_line(size = 1) +
+  geom_point(size = 3) +
+  labs(title="Davie-Bouldin index plot for number of clusters", x ="Clusters", y = "DBindex")+
+  theme_bw()
+
+```
+
+Above plot indicates that any number of clusters can be chosen between **6 annd 8** as till 8 there is significant index value that is carried.
+
+
+```{r scree withdrawals Silhouette}
+DB_values_w_s <- sapply(seq_along(clusterings_w), function(x) 
+  intCriteria(data_seasprof_w, as.integer(clusterings_w[[x]]$clustering),
+              c("Silhouette")))
+
+
+ggplot(data.table(Clusters = 3:10, DBindex = unlist(DB_values_w_s)),
+       aes(Clusters, DBindex)) +
+  geom_line(size = 1) +
+  geom_point(size = 3) +
+  labs(title="Silhouette plot for number of cluster", x ="Clusters", y = "Index")+
+  theme_bw()
+
+```
+
+
+Using Silhouette method there is distinct indication that **6** is the ideal number of clusters to have.
+
+## Heirarchial clustering - SBD
+Lets visualize hierarchical plot now for SBD distance matrix with 6 and check if we get any other result for number of clusters.
+```{r H clust SBD}
+hcc_w<- tsclust(all_CWA_test[1:128,], type = "h", k = 6L,
+              preproc = zscore, seed = 999,
+              distance = "sbd", centroid = shape_extraction,
+              control = hierarchical_control(method = "ward.D2")
+)
+plot(hcc_w, xlab = "Clustering using ward.D2 method", ylab = "",
+     main="Cluster Dendogram using SBD distance measure for Withdrawals")
+rect.hclust(hcc_w, k = 6, border = 2:5)
+```
+
+Plotting heiarachiacal cluster for with SBD and 6 is the good fit. 
+
+###Plot of clusters
+```{r elements of H cluster SBD, out.width="50%", out.height="50%"}
+plot(hcc_w, type = "sc")# plot of different clusters together
+plot(hcc_w, type = "series", clus = 1L)
+plot(hcc_w, type = "series", clus = 2L)
+plot(hcc_w, type = "series", clus = 3L)
+plot(hcc_w, type = "series", clus = 4L)
+plot(hcc_w, type = "series", clus = 5L)
+plot(hcc_w, type = "series", clus = 6L)
+```
+
+Above plots are with using SBD distance for 6 clusters as suggested. Each clusters seem to be appropriately capturing the behaviour at the aggregate level. we will plot data at branch level and ascertain.
+
+```{r create table for SBD and DTW}
+
+clust_df_w <- as.data.frame(hcc_w@cluster)
+clust_df_w$SOLID <- all_CWA_test$SOLID
+colnames(clust_df_w) <- c("SBD", "SOLID")
+
+```
+
+## Heirarchial clustering - DTW - 6 clusters
+```{r H clust DTW}
+hcc_w1<- tsclust(all_CWA_test[1:128,], type = "h", k = 6L,
+                preproc = zscore, seed = 999,
+                distance = "dtw", centroid = shape_extraction,
+                control = hierarchical_control(method = "ward.D2")
+)
+plot(hcc_w1, xlab = "Clustering using ward.D2 method", ylab = "",
+     main="Cluster Dendogram using DTW distance measure for Withdrawals with 6 clusters")
+rect.hclust(hcc_w1, k = 6, border = 2:5)
+```
+
+
+With DTW, we have cluster distribution. Here too we have 6 clusters. There might be a scope of splitting the 6th cluster into two diff clusters. Lets try and plot same.
+
+## Heirarchial clustering - DTW - 7 clusters
+```{r Plot H clust}
+hcc_w1_7<- tsclust(all_CWA_test[1:128,], type = "h", k = 7L,
+                preproc = zscore, seed = 999,
+                distance = "dtw", centroid = shape_extraction,
+                control = hierarchical_control(method = "ward.D2")
+)
+plot(hcc_w1_7, xlab = "Clustering using ward.D2 method", ylab = "",
+     main="Cluster Dendogram using DTW distance measure for withdrawals with 7 clusters")
+rect.hclust(hcc_w1_7, k = 7, border = 2:5)
+```
+
+In this case, 7 seems to be a good indicator visually for the clusters.
+
+
+```{r Update clust table with DTW, message=FALSE, warning=FALSE}
+clust_df_w$dtw <- (hcc_w1_7@cluster)
+colnames(clust_df_w) <- c("SBD", "SOLID", "DTW")
+
+as.data.frame(table(clust_df_w$SBD))
+message("Branch Freq. Distribution for withdrawals with SBD distance measure - 6 clusters")
+as.data.frame(table(clust_df_w$DTW))
+message("Branch Freq. Distribution for withdrawals with DTW distance measure - 7 clusters")
+```
+
+Above distribution is shown for the cluster distribution between SBD and DTW. 
+
+###Plot of branches by clusters - SBD
+We want a visual analysis of how the plots look for each branch by clusters with SBD distance matrix. Each cluster should represent some characteristics behaviour
+```{r Plot clusters by SBD}
+ggplot(data = filter(all_CWA, SOLID %in% c(as.character((clust_df_w%>% filter(clust_df_w$SBD == 1))$SOLID))), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07",method = "loess")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of each branch in cluster 1 with SBD distance matrix", x ="Branch/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CWA, SOLID %in% c(as.character((clust_df_w%>% filter(clust_df_w$SBD == 2))$SOLID))), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07",method = "loess")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of each branch in cluster 2 with SBD distance matrix", x ="Branch/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CWA, SOLID %in% c(as.character((clust_df_w%>% filter(clust_df_w$SBD == 3))$SOLID))), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07",method = "loess")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of each branch in cluster 3 with SBD distance matrix", x ="Branch/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CWA, SOLID %in% c(as.character((clust_df_w%>% filter(clust_df_w$SBD == 4))$SOLID))), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07",method = "loess")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of each branch in cluster 4 with SBD distance matrix", x ="Branch/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CWA, SOLID %in% c(as.character((clust_df_w%>% filter(clust_df_w$SBD == 5))$SOLID))), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07",method = "loess")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of each branch in cluster 5 with SBD distance matrix", x ="Branch/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CWA, SOLID %in% c(as.character((clust_df_w%>% filter(clust_df_w$SBD == 6))$SOLID))), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07",method = "loess")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of each branch in cluster 6 with SBD distance matrix", x ="Branch/Time", y = "Amount")+
+  theme_bw()
+
+
+```
+
+
+Cluster 1 here has expressed seasonality and volatility.  
+Cluster 2 looks a more of steady state affair with some deviations.  
+Cluster 3 has maximum elements and has steady state for complete duration.  
+Cluster 4 does exhibit some trend component in many branches.  
+Cluster 5 has collection of branches with sporadic demands.  
+Cluster 6 has higher degree of volatility compared to other clusters.  
+
+
+
+
+```{r Plot clusters by DTW, message=FALSE}
+ggplot(data = filter(all_CWA, SOLID %in% c(as.character((clust_df_w%>% filter(clust_df_w$DTW == 1))$SOLID))), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of each branch in cluster 1 with DTW distance matrix", x ="Branch/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CWA, SOLID %in% c(as.character((clust_df_w%>% filter(clust_df_w$DTW == 2))$SOLID))), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of each branch in cluster 2 with DTW distance matrix", x ="Branch/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CWA, SOLID %in% c(as.character((clust_df_w%>% filter(clust_df_w$DTW == 3))$SOLID))), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of each branch in cluster 3 with DTW distance matrix", x ="Branch/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CWA, SOLID %in% c(as.character((clust_df_w%>% filter(clust_df_w$DTW == 4))$SOLID))), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of each branch in cluster 4 with DTW distance matrix", x ="Branch/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CWA, SOLID %in% c(as.character((clust_df_w%>% filter(clust_df_w$DTW == 5))$SOLID))), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of each branch in cluster 5 with DTW distance matrix", x ="Branch/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CWA, SOLID %in% c(as.character((clust_df_w%>% filter(clust_df_w$DTW == 6))$SOLID))), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of each branch in cluster 6 with DTW distance matrix", x ="Branch/Time", y = "Amount")+
+  theme_bw()
+
+ggplot(data = filter(all_CWA, SOLID %in% c(as.character((clust_df_w%>% filter(clust_df_w$DTW == 7))$SOLID))), aes(x = date, y = CWA, group=1)) +       
+  geom_line() + 
+  stat_smooth(color = "#FC4E07", fill = "#FC4E07")+
+  facet_wrap(~SOLID, scale = "free")+
+  labs(title="Plot of each branch in cluster 7 with DTW distance matrix", x ="Branch/Time", y = "Amount")+
+  theme_bw()
+
+```
+
+Cluster 1 here has some slight seasonality and volatility.  
+Cluster 2 looks a more of steady state affair with some deviations.  
+Cluster 3 has high volatility with steady mean for complete duration.  
+Cluster 4 does exhibit some trend component in many branches.  
+Cluster 5 has seasonality and trend component.  
+Cluster 6 has collection of branches with sporadic demands.  
+Cluster 7 exhibits volatility  with steady mean, similar to cluster 3.  
+
+
+Between the plots of clusters with 6 and 7, we find the data with 7 clusters is better segregated. Especially it is able to group the branches which has sporadic rises on the timelines.
+
+
+
+#**Conclusions**
+: In this project, we started with data exploration and then moved on to clustering different branches which was the objective of the project. Following conclusion were drawn from this:
+  
+  1. Between methods determining number of clusters, clValid, TSrepr and hierarchical plots, we seem to fall back more with visual concurrence of number of clusters. This was typically seen in withdrawals section where elbow plot showed 6 but h plot showed 7 to be better number.
+
+  2. Plotting each branch gives us fair idea on the distribution. e.g. sporadic data branches are clubbed together. Rising trend data also are grouped together.
+  
+  3. Between the distance SBD and DTW methods used, DTW seems to be responding better to this data. Due to scope limitation in representing here, one needs to try different methods of distance measures to check which fits best. 
+  
+  There are many other functions which also provide functionalities of timeseries exploration and clustering. Functions here were chosen based on ease of use of data. 
+  
+
+#Next Steps
+Use the information of clustering to fine tune parameter for forecasting model. Deploy a separate forecasting model for each cluster.
+
