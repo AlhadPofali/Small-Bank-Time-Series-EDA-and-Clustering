@@ -17,3 +17,4 @@ This dataset is of a small financial institution with transactions of cash depos
 Objective here would be to cluster various branches based on behaviour of deposits and withdrawals. Overarching objective (beyond scope of this exercise) which such study would be to use this cluster information to develop forecasting model with its parameters tuned to a certain cluster.
 
 Repository contains the code to evaluate same. Since the data is under propriety, it is not uploaded.
+Attached report contains complete analysis and out put of code attached.
